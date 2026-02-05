@@ -10,6 +10,40 @@ import urllib.request
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
+# ---------------------------------------------------------------------------
+# File pool infrastructure (optional — set env vars to enable)
+# ---------------------------------------------------------------------------
+_POOL_ENABLED = bool(os.environ.get("RANDOM_POOL_QUEUE_URL"))
+
+if _POOL_ENABLED:
+    import boto3
+
+    _AWS_KEY = os.environ["AWS_ACCESS_KEY_ID"]
+    _AWS_SECRET = os.environ["AWS_SECRET_ACCESS_KEY"]
+    _YMQ_ENDPOINT = os.environ.get(
+        "YMQ_ENDPOINT", "https://message-queue.api.cloud.yandex.net"
+    )
+    _S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "https://storage.yandexcloud.net")
+    _S3_BUCKET = os.environ["S3_BUCKET"]
+    _RANDOM_POOL_QUEUE_URL = os.environ["RANDOM_POOL_QUEUE_URL"]
+    _RANDOM_PHOTO_POOL_QUEUE_URL = os.environ["RANDOM_PHOTO_POOL_QUEUE_URL"]
+    _REFILL_QUEUE_URL = os.environ["REFILL_QUEUE_URL"]
+
+    _sqs = boto3.client(
+        "sqs",
+        endpoint_url=_YMQ_ENDPOINT,
+        region_name="ru-central1",
+        aws_access_key_id=_AWS_KEY,
+        aws_secret_access_key=_AWS_SECRET,
+    )
+    _s3 = boto3.client(
+        "s3",
+        endpoint_url=_S3_ENDPOINT,
+        region_name="ru-central1",
+        aws_access_key_id=_AWS_KEY,
+        aws_secret_access_key=_AWS_SECRET,
+    )
+
 
 def load_ids_from_file(filepath: str = None) -> dict[int, tuple]:
     """Load IDS_BY_DATASET from compact range format file.
@@ -239,14 +273,126 @@ def send_photo_to_chat(chat_id: int, png_bytes: bytes, caption: str) -> bool:
         return False
 
 
-def handle_random_command(chat_id: int, dataset: int | None = None, max_retries: int = 7):
-    """Handle /random command - send random document as image.
+# ---------------------------------------------------------------------------
+# Pool helpers (consume from pre-filled queue, signal refill)
+# ---------------------------------------------------------------------------
 
-    Args:
-        chat_id: Telegram chat ID to send the response to.
-        dataset: Specific dataset number to use. If None, picks random dataset.
-        max_retries: Maximum number of retry attempts.
+def _pool_receive(pool_name: str) -> dict | None:
+    """Try to receive one ready preview from the pool queue.
+
+    Returns parsed message body dict or None if pool is empty / unavailable.
+    On success the message is deleted from the queue (acknowledged).
     """
+    if not _POOL_ENABLED:
+        return None
+
+    queue_url = (
+        _RANDOM_POOL_QUEUE_URL
+        if pool_name == "random"
+        else _RANDOM_PHOTO_POOL_QUEUE_URL
+    )
+
+    try:
+        resp = _sqs.receive_message(
+            QueueUrl=queue_url,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=0,  # no long polling — we need speed
+        )
+        messages = resp.get("Messages", [])
+        if not messages:
+            return None
+
+        msg = messages[0]
+        body = json.loads(msg["Body"])
+
+        # Acknowledge immediately so no other consumer picks it up on retry
+        _sqs.delete_message(
+            QueueUrl=queue_url,
+            ReceiptHandle=msg["ReceiptHandle"],
+        )
+        return body
+    except Exception as e:
+        logger.error("_pool_receive(%s) failed: %s", pool_name, e)
+        return None
+
+
+def _pool_download_jpeg(s3_key: str) -> bytes | None:
+    """Download a cached JPEG preview from Object Storage."""
+    try:
+        resp = _s3.get_object(Bucket=_S3_BUCKET, Key=s3_key)
+        return resp["Body"].read()
+    except Exception as e:
+        logger.error("_pool_download_jpeg(%s) failed: %s", s3_key, e)
+        return None
+
+
+def _pool_cleanup_s3(s3_key: str):
+    """Delete the preview from S3 after it has been sent."""
+    try:
+        _s3.delete_object(Bucket=_S3_BUCKET, Key=s3_key)
+    except Exception as e:
+        logger.warning("_pool_cleanup_s3(%s) failed: %s", s3_key, e)
+
+
+def _pool_request_refill(pool_name: str):
+    """Send a refill signal so the filler tops up the pool."""
+    if not _POOL_ENABLED:
+        return
+    try:
+        _sqs.send_message(
+            QueueUrl=_REFILL_QUEUE_URL,
+            MessageBody=json.dumps({"pool": pool_name}),
+        )
+    except Exception as e:
+        logger.warning("_pool_request_refill(%s) failed: %s", pool_name, e)
+
+
+# ---------------------------------------------------------------------------
+# /random and /random_photo handler
+# ---------------------------------------------------------------------------
+
+def _handle_via_pool(chat_id: int, pool_name: str) -> bool:
+    """Try to serve the request from the pre-filled pool.
+
+    Returns True if the response was sent (success or link fallback).
+    Returns False if pool is empty / unavailable — caller should use legacy path.
+    """
+    entry = _pool_receive(pool_name)
+    if entry is None:
+        return False
+
+    s3_key = entry["s3_key"]
+    file_id = entry["file_id"]
+    original_url = entry["original_url"]
+    caption = f"[{file_id}]({original_url})"
+
+    jpeg_bytes = _pool_download_jpeg(s3_key)
+    if jpeg_bytes is None:
+        # S3 fetch failed — send link as fallback, still counts as handled
+        tg("sendMessage", {
+            "chat_id": chat_id,
+            "text": caption,
+            "parse_mode": "Markdown",
+        })
+        _pool_cleanup_s3(s3_key)
+        return True
+
+    if send_photo_to_chat(chat_id, jpeg_bytes, caption):
+        _pool_cleanup_s3(s3_key)
+        return True
+
+    # Photo send failed — fall back to link
+    tg("sendMessage", {
+        "chat_id": chat_id,
+        "text": caption,
+        "parse_mode": "Markdown",
+    })
+    _pool_cleanup_s3(s3_key)
+    return True
+
+
+def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7):
+    """Original on-the-fly download→convert→send path."""
     last_error = None
     last_doc_id = None
     last_doc_url = None
@@ -269,11 +415,9 @@ def handle_random_command(chat_id: int, dataset: int | None = None, max_retries:
             logger.warning(f"Retry {attempt + 1}/{max_retries}: failed to convert {doc_id}")
             continue
 
-        # Success - send photo
         if send_photo_to_chat(chat_id, png_bytes, caption):
             return
         else:
-            # Photo send failed, but we have the data - send as link
             tg("sendMessage", {
                 "chat_id": chat_id,
                 "text": caption,
@@ -281,7 +425,6 @@ def handle_random_command(chat_id: int, dataset: int | None = None, max_retries:
             })
             return
 
-    # All retries exhausted
     caption = f"[{last_doc_id}]({last_doc_url})" if last_doc_url else "Файл не найден"
     error_msg = "загрузить" if last_error == "download" else "конвертировать"
     tg("sendMessage", {
@@ -289,6 +432,34 @@ def handle_random_command(chat_id: int, dataset: int | None = None, max_retries:
         "text": f"Не удалось {error_msg} PDF после {max_retries} попыток\n\n{caption}",
         "parse_mode": "Markdown",
     })
+
+
+def handle_random_command(chat_id: int, dataset: int | None = None, max_retries: int = 7):
+    """Handle /random command - send random document as image.
+
+    Tries pre-filled pool first (fast path). Falls back to on-the-fly
+    generation if pool is empty or disabled.
+
+    Args:
+        chat_id: Telegram chat ID to send the response to.
+        dataset: Specific dataset number to use. If None, picks random dataset.
+        max_retries: Maximum number of retry attempts for legacy path.
+    """
+    pool_name = "random_photo" if dataset == 2 else "random"
+
+    # Fast path: grab a cached preview from the pool
+    served = _handle_via_pool(chat_id, pool_name)
+
+    # Signal the filler regardless — either we consumed one (needs replacement)
+    # or the pool was empty (needs urgent filling).
+    _pool_request_refill(pool_name)
+
+    if served:
+        return
+
+    # Slow path: generate on-the-fly (pool was empty or disabled)
+    logger.info("pool '%s' empty — falling back to legacy path", pool_name)
+    _handle_legacy(chat_id, dataset, max_retries)
 
 
 def handler(event, context):
