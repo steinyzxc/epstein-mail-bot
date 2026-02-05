@@ -277,16 +277,14 @@ def send_photo_to_chat(chat_id: int, png_bytes: bytes, caption: str) -> bool:
 # Pool helpers (consume from pre-filled queue, signal refill)
 # ---------------------------------------------------------------------------
 
-def _pool_receive(pool_name: str) -> tuple[dict | None, bool]:
+def _pool_receive(pool_name: str) -> dict | None:
     """Try to receive one ready preview from the pool queue.
 
-    Returns (body, needs_refill):
-        body: parsed message dict or None if pool is empty / unavailable.
-        needs_refill: True if pool count dropped below low watermark.
+    Returns parsed message body dict or None if pool is empty / unavailable.
     On success the message is deleted from the queue (acknowledged).
     """
     if not _POOL_ENABLED:
-        return None, False
+        return None
 
     queue_url = (
         _RANDOM_POOL_QUEUE_URL
@@ -295,12 +293,6 @@ def _pool_receive(pool_name: str) -> tuple[dict | None, bool]:
     )
 
     try:
-        attr_resp = _sqs.get_queue_attributes(
-            QueueUrl=queue_url,
-            AttributeNames=["ApproximateNumberOfMessages"],
-        )
-        approx_count = int(attr_resp["Attributes"].get("ApproximateNumberOfMessages", 0))
-
         resp = _sqs.receive_message(
             QueueUrl=queue_url,
             MaxNumberOfMessages=1,
@@ -308,7 +300,7 @@ def _pool_receive(pool_name: str) -> tuple[dict | None, bool]:
         )
         messages = resp.get("Messages", [])
         if not messages:
-            return None, True  # empty — definitely needs refill
+            return None
 
         msg = messages[0]
         body = json.loads(msg["Body"])
@@ -317,10 +309,10 @@ def _pool_receive(pool_name: str) -> tuple[dict | None, bool]:
             QueueUrl=queue_url,
             ReceiptHandle=msg["ReceiptHandle"],
         )
-        return body, (approx_count - 1) < _POOL_LOW_WATERMARK
+        return body
     except Exception as e:
         logger.error("_pool_receive(%s) failed: %s", pool_name, e)
-        return None, False
+        return None
 
 
 def _pool_download_jpeg(s3_key: str) -> bytes | None:
@@ -522,9 +514,8 @@ def handler(event, context):
         })
 
     # Random document — try pool preview first, fall back to link
-    entry, needs_refill = _pool_receive("random")
-    if needs_refill:
-        _pool_request_refill("random")
+    entry = _pool_receive("random")
+    _pool_request_refill("random")
 
     if entry and _POOL_ENABLED:
         presigned_url = _s3.generate_presigned_url(
