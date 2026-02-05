@@ -277,19 +277,14 @@ def send_photo_to_chat(chat_id: int, png_bytes: bytes, caption: str) -> bool:
 # Pool helpers (consume from pre-filled queue, signal refill)
 # ---------------------------------------------------------------------------
 
-_POOL_LOW_WATERMARK = int(os.environ.get("POOL_LOW_WATERMARK", "15"))
-
-
-def _pool_receive(pool_name: str) -> tuple[dict | None, bool]:
+def _pool_receive(pool_name: str) -> dict | None:
     """Try to receive one ready preview from the pool queue.
 
-    Returns (body, needs_refill):
-        body: parsed message dict or None if pool is empty / unavailable.
-        needs_refill: True if pool count dropped below low watermark.
+    Returns parsed message body dict or None if pool is empty / unavailable.
     On success the message is deleted from the queue (acknowledged).
     """
     if not _POOL_ENABLED:
-        return None, False
+        return None
 
     queue_url = (
         _RANDOM_POOL_QUEUE_URL
@@ -298,34 +293,27 @@ def _pool_receive(pool_name: str) -> tuple[dict | None, bool]:
     )
 
     try:
-        # Check approximate count to decide if refill is needed
-        attr_resp = _sqs.get_queue_attributes(
-            QueueUrl=queue_url,
-            AttributeNames=["ApproximateNumberOfMessages"],
-        )
-        approx_count = int(attr_resp["Attributes"].get("ApproximateNumberOfMessages", 0))
-
         resp = _sqs.receive_message(
             QueueUrl=queue_url,
             MaxNumberOfMessages=1,
-            WaitTimeSeconds=0,
+            WaitTimeSeconds=0,  # no long polling — we need speed
         )
         messages = resp.get("Messages", [])
         if not messages:
-            return None, True  # empty pool — definitely needs refill
+            return None
 
         msg = messages[0]
         body = json.loads(msg["Body"])
 
+        # Acknowledge immediately so no other consumer picks it up on retry
         _sqs.delete_message(
             QueueUrl=queue_url,
             ReceiptHandle=msg["ReceiptHandle"],
         )
-        # After consuming one, effective count is approx_count - 1
-        return body, (approx_count - 1) < _POOL_LOW_WATERMARK
+        return body
     except Exception as e:
         logger.error("_pool_receive(%s) failed: %s", pool_name, e)
-        return None, False
+        return None
 
 
 def _pool_download_jpeg(s3_key: str) -> bytes | None:
@@ -363,16 +351,15 @@ def _pool_request_refill(pool_name: str):
 # /random and /random_photo handler
 # ---------------------------------------------------------------------------
 
-def _handle_via_pool(chat_id: int, pool_name: str) -> tuple[bool, bool]:
+def _handle_via_pool(chat_id: int, pool_name: str) -> bool:
     """Try to serve the request from the pre-filled pool.
 
-    Returns (served, needs_refill):
-        served: True if the response was sent.
-        needs_refill: True if pool is below low watermark.
+    Returns True if the response was sent (success or link fallback).
+    Returns False if pool is empty / unavailable — caller should use legacy path.
     """
-    entry, needs_refill = _pool_receive(pool_name)
+    entry = _pool_receive(pool_name)
     if entry is None:
-        return False, needs_refill
+        return False
 
     s3_key = entry["s3_key"]
     file_id = entry["file_id"]
@@ -388,11 +375,11 @@ def _handle_via_pool(chat_id: int, pool_name: str) -> tuple[bool, bool]:
             "parse_mode": "Markdown",
         })
         _pool_cleanup_s3(s3_key)
-        return True, needs_refill
+        return True
 
     if send_photo_to_chat(chat_id, jpeg_bytes, caption):
         _pool_cleanup_s3(s3_key)
-        return True, needs_refill
+        return True
 
     # Photo send failed — fall back to link
     tg("sendMessage", {
@@ -401,7 +388,7 @@ def _handle_via_pool(chat_id: int, pool_name: str) -> tuple[bool, bool]:
         "parse_mode": "Markdown",
     })
     _pool_cleanup_s3(s3_key)
-    return True, needs_refill
+    return True
 
 
 def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7):
@@ -461,10 +448,11 @@ def handle_random_command(chat_id: int, dataset: int | None = None, max_retries:
     pool_name = "random_photo" if dataset == 2 else "random"
 
     # Fast path: grab a cached preview from the pool
-    served, needs_refill = _handle_via_pool(chat_id, pool_name)
+    served = _handle_via_pool(chat_id, pool_name)
 
-    if needs_refill:
-        _pool_request_refill(pool_name)
+    # Signal the filler regardless — either we consumed one (needs replacement)
+    # or the pool was empty (needs urgent filling).
+    _pool_request_refill(pool_name)
 
     if served:
         return
