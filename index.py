@@ -332,7 +332,7 @@ def _handle_via_pool(chat_id: int, pool_name: str) -> bool:
     Returns False if pool is empty / unavailable — caller should use legacy path.
     """
     entry = _pool_receive(pool_name)
-    if entry is None:
+    if entry is None or "tg_file_id" not in entry:
         return False
 
     tg_file_id = entry["tg_file_id"]
@@ -492,6 +492,8 @@ def handler(event, context):
             "type": "photo",
             "id": str(uuid4()),
             "photo_file_id": entry["tg_file_id"],
+            "title": "📄 Рандомный файл Epstein",
+            "description": entry["file_id"],
             "caption": f"[{entry['file_id']}]({entry['original_url']})",
             "parse_mode": "Markdown",
         })
