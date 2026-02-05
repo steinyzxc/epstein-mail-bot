@@ -23,8 +23,6 @@ if _POOL_ENABLED:
     _YMQ_ENDPOINT = os.environ.get(
         "YMQ_ENDPOINT", "https://message-queue.api.cloud.yandex.net"
     )
-    _S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "https://storage.yandexcloud.net")
-    _S3_BUCKET = os.environ["S3_BUCKET"]
     _RANDOM_POOL_QUEUE_URL = os.environ["RANDOM_POOL_QUEUE_URL"]
     _RANDOM_PHOTO_POOL_QUEUE_URL = os.environ["RANDOM_PHOTO_POOL_QUEUE_URL"]
     _REFILL_QUEUE_URL = os.environ["REFILL_QUEUE_URL"]
@@ -32,13 +30,6 @@ if _POOL_ENABLED:
     _sqs = boto3.client(
         "sqs",
         endpoint_url=_YMQ_ENDPOINT,
-        region_name="ru-central1",
-        aws_access_key_id=_AWS_KEY,
-        aws_secret_access_key=_AWS_SECRET,
-    )
-    _s3 = boto3.client(
-        "s3",
-        endpoint_url=_S3_ENDPOINT,
         region_name="ru-central1",
         aws_access_key_id=_AWS_KEY,
         aws_secret_access_key=_AWS_SECRET,
@@ -281,6 +272,7 @@ def _pool_receive(pool_name: str) -> dict | None:
     """Try to receive one ready preview from the pool queue.
 
     Returns parsed message body dict or None if pool is empty / unavailable.
+    Message body: {"tg_file_id": "...", "original_url": "...", "file_id": "...", "dataset": N}
     On success the message is deleted from the queue (acknowledged).
     """
     if not _POOL_ENABLED:
@@ -315,24 +307,6 @@ def _pool_receive(pool_name: str) -> dict | None:
         return None
 
 
-def _pool_download_jpeg(s3_key: str) -> bytes | None:
-    """Download a cached JPEG preview from Object Storage."""
-    try:
-        resp = _s3.get_object(Bucket=_S3_BUCKET, Key=s3_key)
-        return resp["Body"].read()
-    except Exception as e:
-        logger.error("_pool_download_jpeg(%s) failed: %s", s3_key, e)
-        return None
-
-
-def _pool_cleanup_s3(s3_key: str):
-    """Delete the preview from S3 after it has been sent."""
-    try:
-        _s3.delete_object(Bucket=_S3_BUCKET, Key=s3_key)
-    except Exception as e:
-        logger.warning("_pool_cleanup_s3(%s) failed: %s", s3_key, e)
-
-
 def _pool_request_refill(pool_name: str):
     """Send a refill signal so the filler tops up the pool."""
     if not _POOL_ENABLED:
@@ -353,6 +327,7 @@ def _pool_request_refill(pool_name: str):
 def _handle_via_pool(chat_id: int, pool_name: str) -> bool:
     """Try to serve the request from the pre-filled pool.
 
+    Uses Telegram file_id — instant, no download/upload needed.
     Returns True if the response was sent (success or link fallback).
     Returns False if pool is empty / unavailable — caller should use legacy path.
     """
@@ -360,33 +335,29 @@ def _handle_via_pool(chat_id: int, pool_name: str) -> bool:
     if entry is None:
         return False
 
-    s3_key = entry["s3_key"]
+    tg_file_id = entry["tg_file_id"]
     file_id = entry["file_id"]
     original_url = entry["original_url"]
     caption = f"[{file_id}]({original_url})"
 
-    jpeg_bytes = _pool_download_jpeg(s3_key)
-    if jpeg_bytes is None:
-        # S3 fetch failed — send link as fallback, still counts as handled
-        tg("sendMessage", {
+    try:
+        result = tg("sendPhoto", {
             "chat_id": chat_id,
-            "text": caption,
+            "photo": tg_file_id,
+            "caption": caption,
             "parse_mode": "Markdown",
         })
-        _pool_cleanup_s3(s3_key)
-        return True
+        if result.get("ok"):
+            return True
+    except Exception as e:
+        logger.error("sendPhoto by file_id failed: %s", e)
 
-    if send_photo_to_chat(chat_id, jpeg_bytes, caption):
-        _pool_cleanup_s3(s3_key)
-        return True
-
-    # Photo send failed — fall back to link
+    # file_id send failed — fall back to link
     tg("sendMessage", {
         "chat_id": chat_id,
         "text": caption,
         "parse_mode": "Markdown",
     })
-    _pool_cleanup_s3(s3_key)
     return True
 
 
@@ -513,18 +484,14 @@ def handler(event, context):
             "input_message_content": {"message_text": formatted_message},
         })
 
-    # Random document — try pool preview first, fall back to link
+    # Random document — try cached photo from pool, fall back to link
     entry = _pool_receive("random")
-    _pool_request_refill("random")
-
-    if entry and _POOL_ENABLED:
-        # Public URL — bucket must be publicly readable
-        photo_url = f"https://storage.yandexcloud.net/{_S3_BUCKET}/{entry['s3_key']}"
+    if entry and entry.get("tg_file_id"):
+        _pool_request_refill("random")
         results.append({
             "type": "photo",
             "id": str(uuid4()),
-            "photo_url": photo_url,
-            "thumbnail_url": photo_url,
+            "photo_file_id": entry["tg_file_id"],
             "caption": f"[{entry['file_id']}]({entry['original_url']})",
             "parse_mode": "Markdown",
         })
@@ -555,6 +522,9 @@ def handler(event, context):
                 "is_personal": True,
             },
         )
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        logger.error("answerInlineQuery HTTP %s: %s", e.code, body)
     except Exception as e:
         logger.exception("answerInlineQuery failed: %s", e)
 
