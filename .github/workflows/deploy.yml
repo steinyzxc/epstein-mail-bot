@@ -29,6 +29,11 @@ jobs:
       - name: Create deployment package
         run: zip -r function.zip index.py ids.txt requirements.txt
 
+      - name: Get Lockbox secret version
+        run: |
+          VERSION_ID=$(yc lockbox secret get ${{ secrets.LOCKBOX_SECRET_ID }} --format json | jq -r '.current_version.id')
+          echo "LOCKBOX_VERSION_ID=$VERSION_ID" >> $GITHUB_ENV
+
       - name: Deploy to Cloud Functions
         run: |
           yc serverless function version create \
@@ -39,5 +44,5 @@ jobs:
             --execution-timeout=7s \
             --source-path=function.zip \
             --service-account-id=$YC_SA_ID \
-            --secret environment-variable=BOT_TOKEN,id=${{ secrets.LOCKBOX_SECRET_ID }},key=BOT_TOKEN \
-            --secret environment-variable=TG_SECRET_TOKEN,id=${{ secrets.LOCKBOX_SECRET_ID }},key=TG_SECRET_TOKEN
+            --secret environment-variable=BOT_TOKEN,id=${{ secrets.LOCKBOX_SECRET_ID }},version-id=$LOCKBOX_VERSION_ID,key=BOT_TOKEN \
+            --secret environment-variable=TG_SECRET_TOKEN,id=${{ secrets.LOCKBOX_SECRET_ID }},version-id=$LOCKBOX_VERSION_ID,key=TG_SECRET_TOKEN
