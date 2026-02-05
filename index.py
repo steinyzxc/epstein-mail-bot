@@ -514,19 +514,39 @@ def handler(event, context):
             "input_message_content": {"message_text": formatted_message},
         })
 
-    # Always add random document option (link only for speed)
-    doc_url, doc_id = get_random_epstein_doc_url(inline=True)
-    results.append({
-        "type": "article",
-        "id": str(uuid4()),
-        "title": "📄 Рандомный файл Epstein",
-        "description": doc_id,
-        "input_message_content": {
-            "message_text": f"[{doc_id}]({doc_url})",
+    # Random document — try pool preview first, fall back to link
+    entry, needs_refill = _pool_receive("random")
+    if needs_refill:
+        _pool_request_refill("random")
+
+    if entry and _POOL_ENABLED:
+        presigned_url = _s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": _S3_BUCKET, "Key": entry["s3_key"]},
+            ExpiresIn=300,
+        )
+        results.append({
+            "type": "photo",
+            "id": str(uuid4()),
+            "photo_url": presigned_url,
+            "thumbnail_url": presigned_url,
+            "caption": f"[{entry['file_id']}]({entry['original_url']})",
             "parse_mode": "Markdown",
-            "disable_web_page_preview": True,
-        },
-    })
+        })
+        _pool_cleanup_s3(entry["s3_key"])
+    else:
+        doc_url, doc_id = get_random_epstein_doc_url(inline=True)
+        results.append({
+            "type": "article",
+            "id": str(uuid4()),
+            "title": "📄 Рандомный файл Epstein",
+            "description": doc_id,
+            "input_message_content": {
+                "message_text": f"[{doc_id}]({doc_url})",
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True,
+            },
+        })
 
     if not results:
         return {"statusCode": 200, "body": "ok"}
