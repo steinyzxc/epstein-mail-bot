@@ -518,18 +518,13 @@ def handler(event, context):
     _pool_request_refill("random")
 
     if entry and _POOL_ENABLED:
-        # Presigned URL — Telegram fetches the image AFTER we return,
-        # so the S3 object must stay alive. Lifecycle rule cleans up later.
-        presigned_url = _s3.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": _S3_BUCKET, "Key": entry["s3_key"]},
-            ExpiresIn=300,
-        )
+        # Public URL — bucket must be publicly readable
+        photo_url = f"https://storage.yandexcloud.net/{_S3_BUCKET}/{entry['s3_key']}"
         results.append({
             "type": "photo",
             "id": str(uuid4()),
-            "photo_url": presigned_url,
-            "thumbnail_url": presigned_url,
+            "photo_url": photo_url,
+            "thumbnail_url": photo_url,
             "caption": f"[{entry['file_id']}]({entry['original_url']})",
             "parse_mode": "Markdown",
         })
