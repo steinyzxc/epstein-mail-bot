@@ -518,6 +518,8 @@ def handler(event, context):
     _pool_request_refill("random")
 
     if entry and _POOL_ENABLED:
+        # Presigned URL — Telegram fetches the image AFTER we return,
+        # so the S3 object must stay alive. Lifecycle rule cleans up later.
         presigned_url = _s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": _S3_BUCKET, "Key": entry["s3_key"]},
@@ -531,7 +533,6 @@ def handler(event, context):
             "caption": f"[{entry['file_id']}]({entry['original_url']})",
             "parse_mode": "Markdown",
         })
-        _pool_cleanup_s3(entry["s3_key"])
     else:
         doc_url, doc_id = get_random_epstein_doc_url(inline=True)
         results.append({
