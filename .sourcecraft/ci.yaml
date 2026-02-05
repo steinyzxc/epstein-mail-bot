@@ -8,11 +8,16 @@ workflows:
     tasks:
       - name: deploy-function
         cubes:
+          - name: get-iam-token
+            env:
+              ID_TOKEN: ${{ tokens.yc-token.id_token }}
+              YC_SA_ID: ${{ tokens.yc-token.service_account_id }}
+            image: cr.yandex/sourcecraft/yc-iam:latest
+
           - name: deploy
             env:
-              YC_TOKEN: ${{ tokens.yc-token.iam_token }}
+              YC_IAM_TOKEN: ${{ cubes.get-iam-token.outputs.IAM_TOKEN }}
               YC_FOLDER_ID: ${{ tokens.yc-token.folder_id }}
-              YC_CLOUD_ID: ${{ tokens.yc-token.cloud_id }}
               LOCKBOX_SECRET_ID: ${{ secrets.LOCKBOX_SECRET_ID }}
             image:
               name: cr.yandex/sourcecraft/yc-cli:latest
