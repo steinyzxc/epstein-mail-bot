@@ -116,18 +116,19 @@ def download_pdf(url: str) -> bytes | None:
         return None
 
 
-def pdf_first_page_to_png(pdf_bytes: bytes) -> bytes | None:
-    """Convert first page of PDF to JPG image."""
+def pdf_first_page_to_png(pdf_bytes: bytes) -> tuple[bytes, int] | None:
+    """Convert first page of PDF to JPG image. Returns (jpeg_bytes, page_count) or None."""
     import fitz  # PyMuPDF
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pages = len(doc)
         page = doc[0]
         # Render at 2x resolution for better quality
         mat = fitz.Matrix(2, 2)
         pix = page.get_pixmap(matrix=mat)
         png_bytes = pix.tobytes("jpeg", jpg_quality=75)
         doc.close()
-        return png_bytes
+        return png_bytes, pages
     except Exception as e:
         logger.error(f"Failed to convert PDF to JPG: {e}")
         return None
@@ -338,7 +339,10 @@ def _handle_via_pool(chat_id: int, pool_name: str) -> bool:
     tg_file_id = entry["tg_file_id"]
     file_id = entry["file_id"]
     original_url = entry["original_url"]
+    pages = entry.get("pages")
     caption = f"[{file_id}]({original_url})"
+    if pages is not None:
+        caption += f" ({pages} p.)"
 
     try:
         result = tg("sendPhoto", {
@@ -371,7 +375,6 @@ def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7):
         doc_url, doc_id = get_random_epstein_doc_url(dataset=dataset)
         last_doc_id = doc_id
         last_doc_url = doc_url
-        caption = f"[{doc_id}]({doc_url})"
 
         pdf_bytes = download_pdf(doc_url)
         if not pdf_bytes:
@@ -379,11 +382,16 @@ def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7):
             logger.warning(f"Retry {attempt + 1}/{max_retries}: failed to download {doc_id}")
             continue
 
-        png_bytes = pdf_first_page_to_png(pdf_bytes)
-        if not png_bytes:
+        result = pdf_first_page_to_png(pdf_bytes)
+        if not result:
             last_error = "convert"
             logger.warning(f"Retry {attempt + 1}/{max_retries}: failed to convert {doc_id}")
             continue
+        png_bytes, pages = result
+
+        caption = f"[{doc_id}]({doc_url})"
+        if pages is not None:
+            caption += f" ({pages} p.)"
 
         if send_photo_to_chat(chat_id, png_bytes, caption):
             return
@@ -488,13 +496,17 @@ def handler(event, context):
     entry = _pool_receive("random")
     if entry and entry.get("tg_file_id"):
         _pool_request_refill("random")
+        inline_caption = f"[{entry['file_id']}]({entry['original_url']})"
+        inline_pages = entry.get("pages")
+        if inline_pages is not None:
+            inline_caption += f" ({inline_pages} p.)"
         results.append({
             "type": "photo",
             "id": str(uuid4()),
             "photo_file_id": entry["tg_file_id"],
             "title": "📄 Рандомный файл Epstein",
             "description": entry["file_id"],
-            "caption": f"[{entry['file_id']}]({entry['original_url']})",
+            "caption": inline_caption,
             "parse_mode": "Markdown",
         })
     else:
