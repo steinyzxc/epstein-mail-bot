@@ -40,7 +40,7 @@ jobs:
             --function-name=epstein-bot \
             --runtime=python314 \
             --entrypoint=index.handler \
-            --memory=384m \
+            --memory=256m \
             --execution-timeout=7s \
             --source-path=function.zip \
             --service-account-id=$YC_SA_ID \
