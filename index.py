@@ -472,6 +472,18 @@ def handler(event, context):
         # Ignore other messages
         return {"statusCode": 200, "body": "ok"}
 
+    # Handle callback from "Another file" button under inline photo
+    if "callback_query" in update:
+        cq = update["callback_query"]
+        if cq.get("data") == "another_file":
+            chat_id = cq["message"]["chat"]["id"]
+            try:
+                tg("answerCallbackQuery", {"callback_query_id": cq["id"]})
+            except Exception:
+                pass
+            handle_random_command(chat_id)
+        return {"statusCode": 200, "body": "ok"}
+
     # Handle inline queries
     if "inline_query" not in update:
         return {"statusCode": 200, "body": "ok"}
@@ -508,6 +520,9 @@ def handler(event, context):
             "description": entry["file_id"],
             "caption": inline_caption,
             "parse_mode": "Markdown",
+            "reply_markup": {
+                "inline_keyboard": [[{"text": "Another file", "callback_data": "another_file"}]],
+            },
         })
     else:
         doc_url, doc_id = get_random_epstein_doc_url(inline=True)
