@@ -472,16 +472,17 @@ def handler(event, context):
         # Ignore other messages
         return {"statusCode": 200, "body": "ok"}
 
-    # Handle callback from "Another file" button under inline photo
+    # Handle callback from "Another file" button — открыть инлайн ввод в текущем чате
     if "callback_query" in update:
         cq = update["callback_query"]
         if cq.get("data") == "another_file":
-            chat_id = cq["message"]["chat"]["id"]
             try:
-                tg("answerCallbackQuery", {"callback_query_id": cq["id"]})
+                tg("answerCallbackQuery", {
+                    "callback_query_id": cq["id"],
+                    "switch_inline_query_current_chat": "",
+                })
             except Exception:
                 pass
-            handle_random_command(chat_id)
         return {"statusCode": 200, "body": "ok"}
 
     # Handle inline queries
