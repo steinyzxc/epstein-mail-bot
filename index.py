@@ -1,12 +1,24 @@
-import os
-import io
-import json
+import asyncio
 import base64
+import json
 import logging
+import os
 import random
 from datetime import datetime, timedelta
 from uuid import uuid4
 import urllib.request
+
+from telegram import (
+    Bot,
+    InputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InlineQueryResultCachedPhoto,
+    InputTextMessageContent,
+    LinkPreviewOptions,
+)
+from telegram.constants import ParseMode
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
@@ -38,23 +50,23 @@ if _POOL_ENABLED:
 
 def load_ids_from_file(filepath: str = None) -> dict[int, tuple]:
     """Load IDS_BY_DATASET from compact range format file.
-    
+
     Format per line: dataset_id:range1,range2,...
     Where range is either 'start-end' or 'single_id'
     """
     if filepath is None:
         filepath = os.path.join(os.path.dirname(__file__), "ids.txt")
-    
+
     result = {}
     with open(filepath, "r") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            
+
             dataset_str, ranges_str = line.split(":", 1)
             dataset_id = int(dataset_str)
-            
+
             ids = []
             for part in ranges_str.split(","):
                 if "-" in part:
@@ -62,9 +74,9 @@ def load_ids_from_file(filepath: str = None) -> dict[int, tuple]:
                     ids.extend(range(int(start), int(end) + 1))
                 else:
                     ids.append(int(part))
-            
+
             result[dataset_id] = tuple(ids)
-    
+
     return result
 
 
@@ -79,13 +91,12 @@ AVAILABLE_DATASETS = list(IDS_BY_DATASET.keys())
 # Exclude dataset 9 for inline (too large)
 INLINE_DATASETS = [k for k in IDS_BY_DATASET.keys() if k != 9]
 
-# Кнопки под ответами /random и /random_photo
-MORE_RANDOM_BUTTONS = {
-    "inline_keyboard": [[
-        {"text": "Еще файл", "callback_data": "more_random"},
-        {"text": "Еще фото", "callback_data": "more_random_photo"},
-    ]],
-}
+MORE_RANDOM_BUTTONS = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("Еще файл", callback_data="more_random"),
+        InlineKeyboardButton("Еще фото", callback_data="more_random_photo"),
+    ],
+])
 
 
 def _caption_from_user(from_user: dict | None) -> str:
@@ -102,12 +113,7 @@ def _caption_from_user(from_user: dict | None) -> str:
 
 
 def get_random_epstein_doc_url(dataset: int | None = None, inline: bool = False) -> tuple[str, str]:
-    """Return (url, file_id) for a random Epstein document.
-
-    Args:
-        dataset: Specific dataset number to use. If None, picks random dataset.
-        inline: If True, excludes dataset 9 from random selection.
-    """
+    """Return (url, file_id) for a random Epstein document."""
     pool = INLINE_DATASETS if inline else AVAILABLE_DATASETS
     if not pool:
         return ("https://www.justice.gov/epstein", "EFTA00000001")
@@ -133,7 +139,7 @@ def download_pdf(url: str) -> bytes | None:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.read()
     except Exception as e:
-        logger.error(f"Failed to download PDF: {e}")
+        logger.error("Failed to download PDF: %s", e)
         return None
 
 
@@ -144,25 +150,14 @@ def pdf_first_page_to_png(pdf_bytes: bytes) -> tuple[bytes, int] | None:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         pages = len(doc)
         page = doc[0]
-        # Render at 2x resolution for better quality
         mat = fitz.Matrix(2, 2)
         pix = page.get_pixmap(matrix=mat)
         png_bytes = pix.tobytes("jpeg", jpg_quality=75)
         doc.close()
         return png_bytes, pages
     except Exception as e:
-        logger.error(f"Failed to convert PDF to JPG: {e}")
+        logger.error("Failed to convert PDF to JPG: %s", e)
         return None
-
-
-def tg(method: str, payload: dict):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode("utf-8"))
 
 
 # Common name length patterns (first_name, last_name)
@@ -222,7 +217,6 @@ def generate_random_date() -> str:
         second=random.randint(0, 59),
     )
 
-    # Portable formatting (no %-m / %-d dependency)
     weekday = random_date.strftime("%a")
     month = random_date.month
     day = random_date.day
@@ -245,64 +239,12 @@ def format_epstein_message(user_message: str) -> str:
     )
 
 
-def send_photo_to_chat(chat_id: int, png_bytes: bytes, caption: str, reply_markup: dict | None = None) -> bool:
-    """Send photo directly to a chat."""
-    try:
-        boundary = "----WebKitFormBoundary" + uuid4().hex[:16]
-        body = io.BytesIO()
-
-        body.write(f"--{boundary}\r\n".encode())
-        body.write(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
-        body.write(f"{chat_id}\r\n".encode())
-
-        body.write(f"--{boundary}\r\n".encode())
-        body.write(b'Content-Disposition: form-data; name="caption"\r\n\r\n')
-        body.write(f"{caption}\r\n".encode())
-
-        body.write(f"--{boundary}\r\n".encode())
-        body.write(b'Content-Disposition: form-data; name="parse_mode"\r\n\r\n')
-        body.write(b"Markdown\r\n")
-
-        if reply_markup is not None:
-            body.write(f"--{boundary}\r\n".encode())
-            body.write(b'Content-Disposition: form-data; name="reply_markup"\r\n\r\n')
-            body.write(json.dumps(reply_markup).encode())
-            body.write(b"\r\n")
-
-        body.write(f"--{boundary}\r\n".encode())
-        body.write(b'Content-Disposition: form-data; name="photo"; filename="page.png"\r\n')
-        body.write(b"Content-Type: image/png\r\n\r\n")
-        body.write(png_bytes)
-        body.write(b"\r\n")
-
-        body.write(f"--{boundary}--\r\n".encode())
-
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-        req = urllib.request.Request(
-            url,
-            data=body.getvalue(),
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        )
-
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode())
-            return result.get("ok", False)
-    except Exception as e:
-        logger.error(f"Failed to send photo: {e}")
-        return False
-
-
 # ---------------------------------------------------------------------------
 # Pool helpers (consume from pre-filled queue, signal refill)
 # ---------------------------------------------------------------------------
 
 def _pool_receive(pool_name: str) -> dict | None:
-    """Try to receive one ready preview from the pool queue.
-
-    Returns parsed message body dict or None if pool is empty / unavailable.
-    Message body: {"tg_file_id": "...", "original_url": "...", "file_id": "...", "dataset": N}
-    On success the message is deleted from the queue (acknowledged).
-    """
+    """Try to receive one ready preview from the pool queue."""
     if not _POOL_ENABLED:
         return None
 
@@ -349,16 +291,13 @@ def _pool_request_refill(pool_name: str):
 
 
 # ---------------------------------------------------------------------------
-# /random and /random_photo handler
+# /random and /random_photo handler (async, uses Bot)
 # ---------------------------------------------------------------------------
 
-def _handle_via_pool(chat_id: int, pool_name: str, from_user: dict | None = None) -> bool:
-    """Try to serve the request from the pre-filled pool.
-
-    Uses Telegram file_id — instant, no download/upload needed.
-    Returns True if the response was sent (success or link fallback).
-    Returns False if pool is empty / unavailable — caller should use legacy path.
-    """
+async def _handle_via_pool(
+    bot: Bot, chat_id: int, pool_name: str, from_user: dict | None = None
+) -> bool:
+    """Try to serve the request from the pre-filled pool."""
     entry = _pool_receive(pool_name)
     if entry is None or "tg_file_id" not in entry:
         return False
@@ -373,29 +312,33 @@ def _handle_via_pool(chat_id: int, pool_name: str, from_user: dict | None = None
     caption += _caption_from_user(from_user)
 
     try:
-        result = tg("sendPhoto", {
-            "chat_id": chat_id,
-            "photo": tg_file_id,
-            "caption": caption,
-            "parse_mode": "Markdown",
-            "reply_markup": MORE_RANDOM_BUTTONS,
-        })
-        if result.get("ok"):
-            return True
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=tg_file_id,
+            caption=caption,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=MORE_RANDOM_BUTTONS,
+        )
+        return True
     except Exception as e:
         logger.error("sendPhoto by file_id failed: %s", e)
 
-    # file_id send failed — fall back to link
-    tg("sendMessage", {
-        "chat_id": chat_id,
-        "text": caption,
-        "parse_mode": "Markdown",
-        "reply_markup": MORE_RANDOM_BUTTONS,
-    })
+    await bot.send_message(
+        chat_id=chat_id,
+        text=caption,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=MORE_RANDOM_BUTTONS,
+    )
     return True
 
 
-def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7, from_user: dict | None = None):
+async def _handle_legacy(
+    bot: Bot,
+    chat_id: int,
+    dataset: int | None,
+    max_retries: int = 7,
+    from_user: dict | None = None,
+):
     """Original on-the-fly download→convert→send path."""
     last_error = None
     last_doc_id = None
@@ -409,13 +352,13 @@ def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7, from
         pdf_bytes = download_pdf(doc_url)
         if not pdf_bytes:
             last_error = "download"
-            logger.warning(f"Retry {attempt + 1}/{max_retries}: failed to download {doc_id}")
+            logger.warning("Retry %d/%d: failed to download %s", attempt + 1, max_retries, doc_id)
             continue
 
         result = pdf_first_page_to_png(pdf_bytes)
         if not result:
             last_error = "convert"
-            logger.warning(f"Retry {attempt + 1}/{max_retries}: failed to convert {doc_id}")
+            logger.warning("Retry %d/%d: failed to convert %s", attempt + 1, max_retries, doc_id)
             continue
         png_bytes, pages = result
 
@@ -424,59 +367,157 @@ def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7, from
             caption += f" ({pages} p.)"
         caption += _caption_from_user(from_user)
 
-        if send_photo_to_chat(chat_id, png_bytes, caption, reply_markup=MORE_RANDOM_BUTTONS):
+        try:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=InputFile(png_bytes, filename="page.png"),
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=MORE_RANDOM_BUTTONS,
+            )
             return
-        else:
-            tg("sendMessage", {
-                "chat_id": chat_id,
-                "text": caption,
-                "parse_mode": "Markdown",
-                "reply_markup": MORE_RANDOM_BUTTONS,
-            })
-            return
+        except Exception:
+            pass
+        await bot.send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=MORE_RANDOM_BUTTONS,
+        )
+        return
 
     caption = f"[{last_doc_id}]({last_doc_url})" if last_doc_url else "Файл не найден"
     caption += _caption_from_user(from_user)
     error_msg = "загрузить" if last_error == "download" else "конвертировать"
-    tg("sendMessage", {
-        "chat_id": chat_id,
-        "text": f"Не удалось {error_msg} PDF после {max_retries} попыток\n\n{caption}",
-        "parse_mode": "Markdown",
-        "reply_markup": MORE_RANDOM_BUTTONS,
-    })
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"Не удалось {error_msg} PDF после {max_retries} попыток\n\n{caption}",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=MORE_RANDOM_BUTTONS,
+    )
 
 
-def handle_random_command(chat_id: int, dataset: int | None = None, max_retries: int = 7, from_user: dict | None = None):
-    """Handle /random command - send random document as image.
-
-    Tries pre-filled pool first (fast path). Falls back to on-the-fly
-    generation if pool is empty or disabled.
-
-    Args:
-        chat_id: Telegram chat ID to send the response to.
-        dataset: Specific dataset number to use. If None, picks random dataset.
-        max_retries: Maximum number of retry attempts for legacy path.
-        from_user: User who triggered (e.g. callback from) — добавляется ' from @username' к caption.
-    """
+async def handle_random_command_async(
+    bot: Bot,
+    chat_id: int,
+    dataset: int | None = None,
+    max_retries: int = 7,
+    from_user: dict | None = None,
+):
+    """Handle /random command - send random document as image."""
     pool_name = "random_photo" if dataset == 2 else "random"
 
-    # Fast path: grab a cached preview from the pool
-    served = _handle_via_pool(chat_id, pool_name, from_user)
-
-    # Signal the filler regardless — either we consumed one (needs replacement)
-    # or the pool was empty (needs urgent filling).
+    served = await _handle_via_pool(bot, chat_id, pool_name, from_user)
     _pool_request_refill(pool_name)
 
     if served:
         return
 
-    # Slow path: generate on-the-fly (pool was empty or disabled)
     logger.info("pool '%s' empty — falling back to legacy path", pool_name)
-    _handle_legacy(chat_id, dataset, max_retries, from_user)
+    await _handle_legacy(bot, chat_id, dataset, max_retries, from_user)
+
+
+async def process_update(update: dict) -> None:
+    """Process a single webhook update using PTB Bot."""
+    bot = Bot(BOT_TOKEN)
+
+    if "message" in update:
+        msg = update["message"]
+        text = (msg.get("text") or "").strip()
+        chat_id = msg["chat"]["id"]
+
+        if text.startswith("/random_photo"):
+            await handle_random_command_async(bot, chat_id, dataset=2)
+            return
+        if text.startswith("/random"):
+            await handle_random_command_async(bot, chat_id)
+            return
+        return
+
+    if "callback_query" in update:
+        cq = update["callback_query"]
+        data = cq.get("data")
+        msg = cq.get("message")
+        if data in ("more_random", "more_random_photo") and msg is not None:
+            try:
+                await bot.answer_callback_query(callback_query_id=cq["id"])
+            except Exception:
+                pass
+            chat_id = msg["chat"]["id"]
+            from_user = cq.get("from")
+            if data == "more_random":
+                await handle_random_command_async(bot, chat_id, from_user=from_user)
+            else:
+                await handle_random_command_async(bot, chat_id, dataset=2, from_user=from_user)
+        return
+
+    if "inline_query" not in update:
+        return
+
+    iq = update["inline_query"]
+    q = (iq.get("query") or "").strip()
+    results = []
+
+    if q:
+        formatted_message = format_epstein_message(q)
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="📧 Отправить как Epstein",
+                description=(q[:50] + "...") if len(q) > 50 else q,
+                input_message_content=InputTextMessageContent(message_text=formatted_message),
+            )
+        )
+
+    entry = _pool_receive("random")
+    if entry and entry.get("tg_file_id"):
+        _pool_request_refill("random")
+        inline_caption = f"[{entry['file_id']}]({entry['original_url']})"
+        inline_pages = entry.get("pages")
+        if inline_pages is not None:
+            inline_caption += f" ({inline_pages} p.)"
+        results.append(
+            InlineQueryResultCachedPhoto(
+                id=str(uuid4()),
+                photo_file_id=entry["tg_file_id"],
+                title="📄 Рандомный файл Epstein",
+                description=entry["file_id"],
+                caption=inline_caption,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Ещё файл", switch_inline_query_current_chat=""),
+                ]]),
+            )
+        )
+    else:
+        doc_url, doc_id = get_random_epstein_doc_url(inline=True)
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="📄 Рандомный файл Epstein",
+                description=doc_id,
+                input_message_content=InputTextMessageContent(
+                    message_text=f"[{doc_id}]({doc_url})",
+                    parse_mode=ParseMode.MARKDOWN,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True),
+                ),
+            )
+        )
+
+    if results:
+        try:
+            await bot.answer_inline_query(
+                inline_query_id=iq["id"],
+                results=results,
+                cache_time=0,
+                is_personal=True,
+            )
+        except Exception as e:
+            logger.exception("answerInlineQuery failed: %s", e)
 
 
 def handler(event, context):
-    # Optional Telegram webhook secret check
+    """Yandex Cloud Function entry: webhook POST body -> process update."""
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
     if SECRET_TOKEN:
         if headers.get("x-telegram-bot-api-secret-token") != SECRET_TOKEN:
@@ -488,116 +529,9 @@ def handler(event, context):
 
     update = json.loads(body) if body else {}
 
-    # Handle /random and /random_photo commands - send random document as image
-    if "message" in update:
-        msg = update["message"]
-        text = msg.get("text", "")
-        chat_id = msg["chat"]["id"]
-
-        if text.startswith("/random_photo"):
-            # /random_photo - specifically from dataset 2
-            handle_random_command(chat_id, dataset=2)
-            return {"statusCode": 200, "body": "ok"}
-
-        if text.startswith("/random"):
-            # /random - from any dataset
-            handle_random_command(chat_id)
-            return {"statusCode": 200, "body": "ok"}
-
-        # Ignore other messages
-        return {"statusCode": 200, "body": "ok"}
-
-    # Callback: "Еще файл" / "Еще фото" под ответами /random и /random_photo
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        data = cq.get("data")
-        msg = cq.get("message")
-        if data in ("more_random", "more_random_photo") and msg is not None:
-            try:
-                tg("answerCallbackQuery", {"callback_query_id": cq["id"]})
-            except Exception:
-                pass
-            chat_id = msg["chat"]["id"]
-            from_user = cq.get("from")
-            if data == "more_random":
-                handle_random_command(chat_id, from_user=from_user)
-            else:
-                handle_random_command(chat_id, dataset=2, from_user=from_user)
-        return {"statusCode": 200, "body": "ok"}
-
-    # Handle inline queries
-    if "inline_query" not in update:
-        return {"statusCode": 200, "body": "ok"}
-
-    iq = update["inline_query"]
-    q = (iq.get("query") or "").strip()
-
-    results = []
-
-    # If user typed something, add the Epstein message option
-    if q:
-        formatted_message = format_epstein_message(q)
-        results.append({
-            "type": "article",
-            "id": str(uuid4()),
-            "title": "📧 Отправить как Epstein",
-            "description": (q[:50] + "...") if len(q) > 50 else q,
-            "input_message_content": {"message_text": formatted_message},
-        })
-
-    # Random document — try cached photo from pool, fall back to link
-    entry = _pool_receive("random")
-    if entry and entry.get("tg_file_id"):
-        _pool_request_refill("random")
-        inline_caption = f"[{entry['file_id']}]({entry['original_url']})"
-        inline_pages = entry.get("pages")
-        if inline_pages is not None:
-            inline_caption += f" ({inline_pages} p.)"
-        results.append({
-            "type": "photo",
-            "id": str(uuid4()),
-            "photo_file_id": entry["tg_file_id"],
-            "title": "📄 Рандомный файл Epstein",
-            "description": entry["file_id"],
-            "caption": inline_caption,
-            "parse_mode": "Markdown",
-            "reply_markup": {
-                "inline_keyboard": [[
-                    {"text": "Ещё файл", "switch_inline_query_current_chat": ""}
-                ]],
-            },
-        })
-    else:
-        doc_url, doc_id = get_random_epstein_doc_url(inline=True)
-        results.append({
-            "type": "article",
-            "id": str(uuid4()),
-            "title": "📄 Рандомный файл Epstein",
-            "description": doc_id,
-            "input_message_content": {
-                "message_text": f"[{doc_id}]({doc_url})",
-                "parse_mode": "Markdown",
-                "disable_web_page_preview": True,
-            },
-        })
-
-    if not results:
-        return {"statusCode": 200, "body": "ok"}
-
     try:
-        tg(
-            "answerInlineQuery",
-            {
-                "inline_query_id": iq["id"],
-                "results": results,
-                "cache_time": 0,
-                "is_personal": True,
-            },
-        )
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        logger.error("answerInlineQuery HTTP %s: %s", e.code, body)
+        asyncio.run(process_update(update))
     except Exception as e:
-        logger.exception("answerInlineQuery failed: %s", e)
+        logger.exception("process_update failed: %s", e)
 
     return {"statusCode": 200, "body": "ok"}
