@@ -99,17 +99,24 @@ MORE_RANDOM_BUTTONS = InlineKeyboardMarkup([
 ])
 
 
+def _escape_markdown(s: str) -> str:
+    """Escape MarkdownV1 special chars so user content doesn't break parse_mode=Markdown."""
+    for c in ("\\", "_", "*", "`", "[", "]"):
+        s = s.replace(c, "\\" + c)
+    return s
+
+
 def _caption_from_user(from_user: dict | None) -> str:
     """Суффикс к caption при запросе по кнопке: ' from @username' или ' from FirstName'."""
     if not from_user:
         return ""
     username = from_user.get("username")
     if username:
-        return f" from @{username}"
+        return " from @" + _escape_markdown(username)
     first = (from_user.get("first_name") or "").strip()
     if first:
-        return f" from {first}"
-    return f" from id:{from_user.get('id', '')}"
+        return " from " + _escape_markdown(first)
+    return " from id:" + _escape_markdown(str(from_user.get("id", "")))
 
 
 def get_random_epstein_doc_url(dataset: int | None = None, inline: bool = False) -> tuple[str, str]:
