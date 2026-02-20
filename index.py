@@ -79,6 +79,14 @@ AVAILABLE_DATASETS = list(IDS_BY_DATASET.keys())
 # Exclude dataset 9 for inline (too large)
 INLINE_DATASETS = [k for k in IDS_BY_DATASET.keys() if k != 9]
 
+# Кнопки под ответами /random и /random_photo
+MORE_RANDOM_BUTTONS = {
+    "inline_keyboard": [[
+        {"text": "Еще файл", "callback_data": "more_random"},
+        {"text": "Еще фото", "callback_data": "more_random_photo"},
+    ]],
+}
+
 
 def get_random_epstein_doc_url(dataset: int | None = None, inline: bool = False) -> tuple[str, str]:
     """Return (url, file_id) for a random Epstein document.
@@ -224,7 +232,7 @@ def format_epstein_message(user_message: str) -> str:
     )
 
 
-def send_photo_to_chat(chat_id: int, png_bytes: bytes, caption: str) -> bool:
+def send_photo_to_chat(chat_id: int, png_bytes: bytes, caption: str, reply_markup: dict | None = None) -> bool:
     """Send photo directly to a chat."""
     try:
         boundary = "----WebKitFormBoundary" + uuid4().hex[:16]
@@ -241,6 +249,12 @@ def send_photo_to_chat(chat_id: int, png_bytes: bytes, caption: str) -> bool:
         body.write(f"--{boundary}\r\n".encode())
         body.write(b'Content-Disposition: form-data; name="parse_mode"\r\n\r\n')
         body.write(b"Markdown\r\n")
+
+        if reply_markup is not None:
+            body.write(f"--{boundary}\r\n".encode())
+            body.write(b'Content-Disposition: form-data; name="reply_markup"\r\n\r\n')
+            body.write(json.dumps(reply_markup).encode())
+            body.write(b"\r\n")
 
         body.write(f"--{boundary}\r\n".encode())
         body.write(b'Content-Disposition: form-data; name="photo"; filename="page.png"\r\n')
@@ -350,6 +364,7 @@ def _handle_via_pool(chat_id: int, pool_name: str) -> bool:
             "photo": tg_file_id,
             "caption": caption,
             "parse_mode": "Markdown",
+            "reply_markup": MORE_RANDOM_BUTTONS,
         })
         if result.get("ok"):
             return True
@@ -361,6 +376,7 @@ def _handle_via_pool(chat_id: int, pool_name: str) -> bool:
         "chat_id": chat_id,
         "text": caption,
         "parse_mode": "Markdown",
+        "reply_markup": MORE_RANDOM_BUTTONS,
     })
     return True
 
@@ -393,13 +409,14 @@ def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7):
         if pages is not None:
             caption += f" ({pages} p.)"
 
-        if send_photo_to_chat(chat_id, png_bytes, caption):
+        if send_photo_to_chat(chat_id, png_bytes, caption, reply_markup=MORE_RANDOM_BUTTONS):
             return
         else:
             tg("sendMessage", {
                 "chat_id": chat_id,
                 "text": caption,
                 "parse_mode": "Markdown",
+                "reply_markup": MORE_RANDOM_BUTTONS,
             })
             return
 
@@ -409,6 +426,7 @@ def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7):
         "chat_id": chat_id,
         "text": f"Не удалось {error_msg} PDF после {max_retries} попыток\n\n{caption}",
         "parse_mode": "Markdown",
+        "reply_markup": MORE_RANDOM_BUTTONS,
     })
 
 
@@ -470,6 +488,23 @@ def handler(event, context):
             return {"statusCode": 200, "body": "ok"}
 
         # Ignore other messages
+        return {"statusCode": 200, "body": "ok"}
+
+    # Callback: "Еще файл" / "Еще фото" под ответами /random и /random_photo
+    if "callback_query" in update:
+        cq = update["callback_query"]
+        data = cq.get("data")
+        msg = cq.get("message")
+        if data in ("more_random", "more_random_photo") and msg is not None:
+            try:
+                tg("answerCallbackQuery", {"callback_query_id": cq["id"]})
+            except Exception:
+                pass
+            chat_id = msg["chat"]["id"]
+            if data == "more_random":
+                handle_random_command(chat_id)
+            else:
+                handle_random_command(chat_id, dataset=2)
         return {"statusCode": 200, "body": "ok"}
 
     # Handle inline queries
