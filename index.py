@@ -487,7 +487,7 @@ def handler(event, context):
         results.append({
             "type": "article",
             "id": str(uuid4()),
-            "title": "Ещё файл",
+            "title": "📧 Отправить как Epstein",
             "description": (q[:50] + "...") if len(q) > 50 else q,
             "input_message_content": {"message_text": formatted_message},
         })
@@ -510,7 +510,7 @@ def handler(event, context):
             "parse_mode": "Markdown",
             "reply_markup": {
                 "inline_keyboard": [[
-                    {"text": "📤 Отправить еще inline", "switch_inline_query_current_chat": ""}
+                    {"text": "Ещё файл", "switch_inline_query_current_chat": ""}
                 ]],
             },
         })
