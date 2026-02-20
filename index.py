@@ -487,7 +487,7 @@ def handler(event, context):
         results.append({
             "type": "article",
             "id": str(uuid4()),
-            "title": "📧 Отправить как Epstein",
+            "title": "Ещё файл",
             "description": (q[:50] + "...") if len(q) > 50 else q,
             "input_message_content": {"message_text": formatted_message},
         })
