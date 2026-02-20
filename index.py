@@ -472,19 +472,6 @@ def handler(event, context):
         # Ignore other messages
         return {"statusCode": 200, "body": "ok"}
 
-    # Handle callback from "Another file" button — открыть инлайн ввод в текущем чате
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        if cq.get("data") == "another_file":
-            try:
-                tg("answerCallbackQuery", {
-                    "callback_query_id": cq["id"],
-                    "switch_inline_query_current_chat": "",
-                })
-            except Exception:
-                pass
-        return {"statusCode": 200, "body": "ok"}
-
     # Handle inline queries
     if "inline_query" not in update:
         return {"statusCode": 200, "body": "ok"}
@@ -522,7 +509,9 @@ def handler(event, context):
             "caption": inline_caption,
             "parse_mode": "Markdown",
             "reply_markup": {
-                "inline_keyboard": [[{"text": "Another file", "callback_data": "another_file"}]],
+                "inline_keyboard": [[
+                    {"text": "📤 Отправить еще inline", "switch_inline_query_current_chat": ""}
+                ]],
             },
         })
     else:
