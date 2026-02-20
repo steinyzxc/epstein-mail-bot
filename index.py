@@ -88,6 +88,19 @@ MORE_RANDOM_BUTTONS = {
 }
 
 
+def _caption_from_user(from_user: dict | None) -> str:
+    """Суффикс к caption при запросе по кнопке: ' from @username' или ' from FirstName'."""
+    if not from_user:
+        return ""
+    username = from_user.get("username")
+    if username:
+        return f" from @{username}"
+    first = (from_user.get("first_name") or "").strip()
+    if first:
+        return f" from {first}"
+    return f" from id:{from_user.get('id', '')}"
+
+
 def get_random_epstein_doc_url(dataset: int | None = None, inline: bool = False) -> tuple[str, str]:
     """Return (url, file_id) for a random Epstein document.
 
@@ -339,7 +352,7 @@ def _pool_request_refill(pool_name: str):
 # /random and /random_photo handler
 # ---------------------------------------------------------------------------
 
-def _handle_via_pool(chat_id: int, pool_name: str) -> bool:
+def _handle_via_pool(chat_id: int, pool_name: str, from_user: dict | None = None) -> bool:
     """Try to serve the request from the pre-filled pool.
 
     Uses Telegram file_id — instant, no download/upload needed.
@@ -357,6 +370,7 @@ def _handle_via_pool(chat_id: int, pool_name: str) -> bool:
     caption = f"[{file_id}]({original_url})"
     if pages is not None:
         caption += f" ({pages} p.)"
+    caption += _caption_from_user(from_user)
 
     try:
         result = tg("sendPhoto", {
@@ -381,7 +395,7 @@ def _handle_via_pool(chat_id: int, pool_name: str) -> bool:
     return True
 
 
-def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7):
+def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7, from_user: dict | None = None):
     """Original on-the-fly download→convert→send path."""
     last_error = None
     last_doc_id = None
@@ -408,6 +422,7 @@ def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7):
         caption = f"[{doc_id}]({doc_url})"
         if pages is not None:
             caption += f" ({pages} p.)"
+        caption += _caption_from_user(from_user)
 
         if send_photo_to_chat(chat_id, png_bytes, caption, reply_markup=MORE_RANDOM_BUTTONS):
             return
@@ -421,6 +436,7 @@ def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7):
             return
 
     caption = f"[{last_doc_id}]({last_doc_url})" if last_doc_url else "Файл не найден"
+    caption += _caption_from_user(from_user)
     error_msg = "загрузить" if last_error == "download" else "конвертировать"
     tg("sendMessage", {
         "chat_id": chat_id,
@@ -430,7 +446,7 @@ def _handle_legacy(chat_id: int, dataset: int | None, max_retries: int = 7):
     })
 
 
-def handle_random_command(chat_id: int, dataset: int | None = None, max_retries: int = 7):
+def handle_random_command(chat_id: int, dataset: int | None = None, max_retries: int = 7, from_user: dict | None = None):
     """Handle /random command - send random document as image.
 
     Tries pre-filled pool first (fast path). Falls back to on-the-fly
@@ -440,11 +456,12 @@ def handle_random_command(chat_id: int, dataset: int | None = None, max_retries:
         chat_id: Telegram chat ID to send the response to.
         dataset: Specific dataset number to use. If None, picks random dataset.
         max_retries: Maximum number of retry attempts for legacy path.
+        from_user: User who triggered (e.g. callback from) — добавляется ' from @username' к caption.
     """
     pool_name = "random_photo" if dataset == 2 else "random"
 
     # Fast path: grab a cached preview from the pool
-    served = _handle_via_pool(chat_id, pool_name)
+    served = _handle_via_pool(chat_id, pool_name, from_user)
 
     # Signal the filler regardless — either we consumed one (needs replacement)
     # or the pool was empty (needs urgent filling).
@@ -455,7 +472,7 @@ def handle_random_command(chat_id: int, dataset: int | None = None, max_retries:
 
     # Slow path: generate on-the-fly (pool was empty or disabled)
     logger.info("pool '%s' empty — falling back to legacy path", pool_name)
-    _handle_legacy(chat_id, dataset, max_retries)
+    _handle_legacy(chat_id, dataset, max_retries, from_user)
 
 
 def handler(event, context):
@@ -501,10 +518,11 @@ def handler(event, context):
             except Exception:
                 pass
             chat_id = msg["chat"]["id"]
+            from_user = cq.get("from")
             if data == "more_random":
-                handle_random_command(chat_id)
+                handle_random_command(chat_id, from_user=from_user)
             else:
-                handle_random_command(chat_id, dataset=2)
+                handle_random_command(chat_id, dataset=2, from_user=from_user)
         return {"statusCode": 200, "body": "ok"}
 
     # Handle inline queries
